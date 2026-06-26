@@ -1,0 +1,211 @@
+# Infra services start with plain `docker compose up -d`
+# App services (backend, frontend) start with `docker compose --profile app up -d`
+# They require their Dockerfiles to exist first (built in Phase 1 and Phase 5).
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  # ── 1. PostgreSQL 16 ──────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: argent
+      POSTGRES_USER: argent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"       # host 5433 → container 5432 (avoids conflict with local Postgres)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U argent -d argent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  # ── 2. Redis 7 ────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6380:6379"       # host 6380 → container 6379 (avoids conflict with local Redis)
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *default-logging
+
+  # ── 3. ChromaDB ───────────────────────────────────────────────────────────────
+  chromadb:
+    image: chromadb/chroma:latest
+    restart: unless-stopped
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+      CHROMA_SERVER_AUTHN_CREDENTIALS: ${CHROMA_TOKEN}
+      CHROMA_SERVER_AUTHN_PROVIDER: chromadb.auth.token_authn.TokenAuthenticationServerProvider
+    volumes:
+      - chroma_data:/chroma/chroma
+    ports:
+      - "8002:8000"       # host 8002 → container 8000 (avoids conflict with local services)
+    logging: *default-logging
+
+  # ── 4. Neo4j 5 Community ──────────────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5-community
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
+      NEO4J_PLUGINS: '["apoc"]'
+      # Memory — tuned for 4GB host alongside GPU workloads
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_dbms_security_procedures_allowlist: "apoc.*"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    ports:
+      - "7475:7474"   # Neo4j Browser UI  (host 7475 → container 7474)
+      - "7688:7687"   # Bolt protocol     (host 7688 → container 7687)
+    healthcheck:
+      test: >
+        wget -q --spider
+        http://localhost:7474/browser/
+        && exit 0 || exit 1
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    logging: *default-logging
+
+  # ── 5. LiveKit ────────────────────────────────────────────────────────────────
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    command: --config /etc/livekit/livekit.yaml
+    volumes:
+      - ./livekit-config/livekit.yaml:/etc/livekit/livekit.yaml:ro
+    ports:
+      - "7880:7880"                         # HTTP API + WebSocket signalling
+      - "7881:7881"                         # RTC over TCP
+      - "50200-50220:50200-50220/udp"       # WebRTC media (UDP)
+    environment:
+      # Format: "api_key: api_secret"  (note the space after colon)
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    logging: *default-logging
+
+  # ── 6. Ollama (GPU) ───────────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    environment:
+      OLLAMA_KEEP_ALIVE: "10m"      # evict model after 10min idle to free VRAM
+      OLLAMA_NUM_GPU: "1"
+      OLLAMA_GPU_LAYERS: "35"       # all layers for qwen3:4b Q4 fit in 4GB VRAM
+    logging: *default-logging
+
+  # ── 7. FastAPI Backend ────────────────────────────────────────────────────────
+  # profile:app — only starts after `docker compose --profile app up`
+  # Requires backend/Dockerfile (created in Phase 1)
+  backend:
+    profiles: [app]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+      ollama:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql+asyncpg://argent:${POSTGRES_PASSWORD}@postgres:5432/argent
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+      CHROMA_TOKEN: ${CHROMA_TOKEN}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b}
+      LIVEKIT_URL: http://livekit:7880
+      LIVEKIT_WS_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      PIPER_MODEL_PATH: /piper-models/en_US-lessac-medium.onnx
+      SECRET_KEY: ${SECRET_KEY}
+    volumes:
+      - ./piper-models:/piper-models:ro
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]   # Faster-Whisper uses CUDA
+    logging: *default-logging
+
+  # ── 8. Next.js Frontend ───────────────────────────────────────────────────────
+  # profile:app — only starts after `docker compose --profile app up`
+  # Requires frontend/Dockerfile (created in Phase 5)
+  frontend:
+    profiles: [app]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+        NEXT_PUBLIC_LIVEKIT_URL: ws://localhost:7880
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_LIVEKIT_URL: ws://localhost:7880
+    logging: *default-logging
+
+volumes:
+  postgres_data:
+  redis_data:
+  chroma_data:
+  neo4j_data:
+  neo4j_logs:
+  ollama_data:

@@ -1,0 +1,25 @@
+# LiveKit server configuration — local dev
+# Keys are injected via LIVEKIT_KEYS env var in docker-compose, not set here.
+
+port: 7880
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50200
+  port_range_end: 50220
+  use_external_ip: false
+
+logging:
+  level: info
+  json: false
+
+room:
+  max_participants: 10
+  empty_timeout: 300s
+  departure_timeout: 20s
+
+# Disable TURN for local dev (no STUN/TURN server needed on LAN)
+turn:
+  enabled: false
+
+development: true
