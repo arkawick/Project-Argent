@@ -171,7 +171,7 @@ services:
     volumes:
       - ./piper-models:/piper-models:ro
     ports:
-      - "8000:8000"
+      - "8090:8000"   # host 8090 → container 8000 (avoids conflict with local service)
     deploy:
       resources:
         reservations:
@@ -190,7 +190,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: http://localhost:8000
+        NEXT_PUBLIC_API_URL: http://localhost:8090
         NEXT_PUBLIC_LIVEKIT_URL: ws://localhost:7880
     restart: unless-stopped
     depends_on:
@@ -198,7 +198,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: http://localhost:8090
       NEXT_PUBLIC_LIVEKIT_URL: ws://localhost:7880
     logging: *default-logging
 

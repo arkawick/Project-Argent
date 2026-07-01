@@ -141,8 +141,8 @@ alembic upgrade head
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Backend available at: `http://localhost:8000`  
-Interactive API docs (Swagger UI): `http://localhost:8000/docs`
+Backend available at: `http://localhost:8090`  
+Interactive API docs (Swagger UI): `http://localhost:8090/docs`
 
 ### 6 — Start the frontend
 
@@ -208,7 +208,7 @@ Full list in [`.env.example`](.env.example). Key variables:
 | Service | Port | Purpose |
 |---------|------|---------|
 | Frontend | 3000 | Next.js dev server |
-| Backend API | 8000 | FastAPI + Uvicorn |
+| Backend API | 8090 | Host port (container listens on 8000 internally) |
 | LiveKit HTTP/WS | 7880 | WebRTC signalling |
 | LiveKit RTC TCP | 7881 | WebRTC media fallback |
 | LiveKit RTC UDP | 50200–50220 | WebRTC media (primary) |
